@@ -390,14 +390,22 @@
   }
 
   function buildVerdictFromPage(pageText, url){
+    // strip any HTML tags/entities so wording checks work regardless of which proxy/mode returned this
+    const clean = pageText
+      .replace(/<[^>]+>/g, " ")
+      .replace(/&nbsp;/gi, " ")
+      .replace(/&amp;/gi, "&")
+      .replace(/\s+/g, " ");
+
     let overall = "unknown";
     if (/hs-yes\.jpg/i.test(pageText)) overall = "green";
     else if (/hs-no\.jpg/i.test(pageText)) overall = "red";
-    else if (/non-?\s?shariah compliant stock/i.test(pageText)) overall = "red";
-    else if (/shariah compliant stock/i.test(pageText)) overall = "green";
-    const sectorMatch = pageText.match(/Sector\s*[–-]\s*Industry\s*:\s*([^\n]+)/i);
+    else if (/non[\s-]?shariah compliant|not\s+(a\s+)?shariah compliant/i.test(clean)) overall = "red";
+    else if (/shariah compliant stock|halal and shariah compliant/i.test(clean)) overall = "green";
+
+    const sectorMatch = clean.match(/Sector\s*[–-]\s*Industry\s*:\s*([^.\n]+)/i);
     const sector = sectorMatch ? sectorMatch[1].trim() : "";
-    const updatedMatch = pageText.match(/Last Updated on ([^\n]+?\d{4})/i);
+    const updatedMatch = clean.match(/Last Updated on ([A-Za-z]+ \d{1,2},? \d{4})/i);
     const updated = updatedMatch ? updatedMatch[1].trim() : "";
     return { found:true, overall, sector, updated, sourceUrl:url };
   }
@@ -766,7 +774,7 @@
     if (!item) return;
     const panel = document.getElementById("halal-" + id);
 
-    if (item.halal){
+    if (item.halal && item.halal.found && (item.halal.overall === "green" || item.halal.overall === "red")){
       panel.classList.toggle("show");
       return;
     }
