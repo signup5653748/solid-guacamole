@@ -389,6 +389,19 @@
     return { lines, flat };
   }
 
+  const STOPWORDS = new Set(["ltd","limited","india","the","of","and","private","pvt","co","company","inc","services","enterprises"]);
+  function nameKeywords(companyName){
+    return companyName.toLowerCase().replace(/[^a-z0-9 ]/g," ").split(/\s+/).filter(w => w.length > 2 && !STOPWORDS.has(w));
+  }
+  // Require most of the company's distinctive name words to actually appear on the fetched page —
+  // prevents a loose site-search from matching an unrelated company (e.g. both containing "India").
+  function pageMatchesCompany(pageFlatTextLower, companyName){
+    const words = nameKeywords(companyName);
+    if (!words.length) return true;
+    const matched = words.filter(w => pageFlatTextLower.includes(w));
+    return matched.length >= Math.max(1, Math.ceil(words.length * 0.6));
+  }
+
   async function fetchViaDdgSiteSearch(domain, urlPattern, companyName){
     const ddgUrl = "https://html.duckduckgo.com/html/?q=" + encodeURIComponent(`site:${domain} ${companyName} shariah compliant`);
     const { text } = await fetchWithProxies(ddgUrl);
@@ -397,9 +410,13 @@
       const uddg = Array.from(text.matchAll(/uddg=([^&"]+)/g)).map(m => decodeURIComponent(m[1]));
       links = uddg.filter(u => urlPattern.test(u));
     }
-    if (!links.length) return null;
-    const page = await fetchWithProxies(links[0]);
-    return { text: page.text, url: links[0] };
+    if (!links.length) return [];
+    // rank by how much the URL/slug itself overlaps with the company name, before spending fetches
+    const words = nameKeywords(companyName);
+    return links
+      .map(link => ({ link, score: words.filter(w => link.toLowerCase().includes(w)).length }))
+      .sort((a,b) => b.score - a.score)
+      .map(s => s.link);
   }
 
   // --- Source 1: halalstock.in — publishes per-IPO verdict articles at a guessable URL ---
@@ -411,14 +428,20 @@
       try{
         const { text } = await fetchWithProxies(url);
         const { lines, flat } = stripToLines(text);
-        if (/Sector\s*[–-]\s*Industry/i.test(flat) || /shariah compliant stock/i.test(flat)){
+        if ((/Sector\s*[–-]\s*Industry/i.test(flat) || /shariah compliant stock/i.test(flat)) && pageMatchesCompany(flat.toLowerCase(), companyName)){
           return parseHalalstockPage(text, lines, flat, url);
         }
       }catch(e){ /* try next candidate */ }
     }
     try{
-      const hit = await fetchViaDdgSiteSearch("halalstock.in", /https:\/\/halalstock\.in\/is-[a-z0-9-]+-halal-and-shariah-compliant\/?/gi, companyName);
-      if (hit){ const { lines, flat } = stripToLines(hit.text); return parseHalalstockPage(hit.text, lines, flat, hit.url); }
+      const links = await fetchViaDdgSiteSearch("halalstock.in", /https:\/\/halalstock\.in\/is-[a-z0-9-]+-halal-and-shariah-compliant\/?/gi, companyName);
+      for (const link of links.slice(0,3)){
+        try{
+          const page = await fetchWithProxies(link);
+          const { lines, flat } = stripToLines(page.text);
+          if (pageMatchesCompany(flat.toLowerCase(), companyName)) return parseHalalstockPage(page.text, lines, flat, link);
+        }catch(e){ /* try next link */ }
+      }
     }catch(e){ /* fall through */ }
     return { name:"halalstock.in", found:false };
   }
@@ -449,13 +472,20 @@
   // so we can only find it via search (no direct URL guess possible without the ticker). ---
   async function fetchMusaffaVerdict(companyName){
     try{
-      const hit = await fetchViaDdgSiteSearch("musaffa.com/stock", /https:\/\/musaffa\.com\/stock\/[A-Za-z0-9.\-]+\/?/gi, companyName);
-      if (!hit) return { name:"Musaffa", found:false };
-      const { flat } = stripToLines(hit.text);
-      let overall = "unknown";
-      if (/classified as\s+HALAL|considered Halal\s*&?\s*Shariah Compliant|currently\s+Halal/i.test(flat)) overall = "green";
-      else if (/classified as\s+(NON[\s-]?HALAL|HARAM)|considered\s+(Non[\s-]?Compliant|Haram)|NOT\s+Shariah Compliant/i.test(flat)) overall = "red";
-      return { name:"Musaffa", found:true, overall, sourceUrl:hit.url };
+      const links = await fetchViaDdgSiteSearch("musaffa.com/stock", /https:\/\/musaffa\.com\/stock\/[A-Za-z0-9.\-]+\/?/gi, companyName);
+      for (const link of links.slice(0,3)){
+        try{
+          const page = await fetchWithProxies(link);
+          const { flat } = stripToLines(page.text);
+          const flatLower = flat.toLowerCase();
+          if (!pageMatchesCompany(flatLower, companyName)) continue;
+          let overall = "unknown";
+          if (/classified as\s+HALAL|considered Halal\s*&?\s*Shariah Compliant|currently\s+Halal/i.test(flat)) overall = "green";
+          else if (/classified as\s+(NON[\s-]?HALAL|HARAM)|considered\s+(Non[\s-]?Compliant|Haram)|NOT\s+Shariah Compliant/i.test(flat)) overall = "red";
+          return { name:"Musaffa", found:true, overall, sourceUrl:link };
+        }catch(e){ /* try next link */ }
+      }
+      return { name:"Musaffa", found:false };
     }catch(e){
       return { name:"Musaffa", found:false };
     }
