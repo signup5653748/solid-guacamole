@@ -355,46 +355,51 @@
   ];
 
   async function fetchHalalVerdict(companyName){
-    const searchUrl = "https://halalstock.in/?s=" + encodeURIComponent(companyName);
-    let searchText;
-    try{
-      const r = await fetchWithProxies(searchUrl);
-      searchText = r.text;
-    }catch(e){
-      return { found:false, error: (e.attempts||[]).join(" | ") || e.message };
+    const base = companyName.toLowerCase()
+      .replace(/&/g,"")
+      .replace(/[^a-z0-9]+/g,"-")
+      .replace(/^-+|-+$/g,"");
+    const candidates = [base, base + "-ltd", base + "-limited"];
+
+    for (const slug of candidates){
+      const url = `https://halalstock.in/is-${slug}-halal-and-shariah-compliant/`;
+      try{
+        const { text } = await fetchWithProxies(url);
+        if (/Sector\s*[–-]\s*Industry/i.test(text) || /shariah compliant stock/i.test(text)){
+          return buildVerdictFromPage(text, url);
+        }
+      }catch(e){ /* try next candidate */ }
     }
 
-    const linkRe = /https:\/\/halalstock\.in\/is-[a-z0-9-]+-halal-and-shariah-compliant\/?/gi;
-    const links = Array.from(new Set(searchText.match(linkRe) || []));
-    if (!links.length) return { found:false };
-
-    const nameWords = companyName.toLowerCase().replace(/[^a-z0-9 ]/g," ").split(/\s+/).filter(w => w.length > 2);
-    let best = links[0], bestScore = -1;
-    links.forEach(link => {
-      const score = nameWords.filter(w => link.toLowerCase().includes(w)).length;
-      if (score > bestScore){ bestScore = score; best = link; }
-    });
-
-    let pageText;
+    // fallback: a real search engine, since halalstock.in's own search doesn't work via plain fetch
     try{
-      const r2 = await fetchWithProxies(best);
-      pageText = r2.text;
-    }catch(e){
-      return { found:false, error: (e.attempts||[]).join(" | ") || e.message };
-    }
+      const ddgUrl = "https://html.duckduckgo.com/html/?q=" + encodeURIComponent(`site:halalstock.in ${companyName} halal shariah compliant`);
+      const { text } = await fetchWithProxies(ddgUrl);
+      let links = Array.from(new Set(text.match(/https:\/\/halalstock\.in\/is-[a-z0-9-]+-halal-and-shariah-compliant\/?/gi) || []));
+      if (!links.length){
+        const uddg = Array.from(text.matchAll(/uddg=([^&"]+)/g)).map(m => decodeURIComponent(m[1]));
+        links = uddg.filter(u => /halalstock\.in\/is-.*-halal-and-shariah-compliant/i.test(u));
+      }
+      if (links.length){
+        const page = await fetchWithProxies(links[0]);
+        return buildVerdictFromPage(page.text, links[0]);
+      }
+    }catch(e){ /* fall through */ }
 
+    return { found:false };
+  }
+
+  function buildVerdictFromPage(pageText, url){
     let overall = "unknown";
     if (/hs-yes\.jpg/i.test(pageText)) overall = "green";
     else if (/hs-no\.jpg/i.test(pageText)) overall = "red";
     else if (/non-?\s?shariah compliant stock/i.test(pageText)) overall = "red";
     else if (/shariah compliant stock/i.test(pageText)) overall = "green";
-
     const sectorMatch = pageText.match(/Sector\s*[–-]\s*Industry\s*:\s*([^\n]+)/i);
     const sector = sectorMatch ? sectorMatch[1].trim() : "";
     const updatedMatch = pageText.match(/Last Updated on ([^\n]+?\d{4})/i);
     const updated = updatedMatch ? updatedMatch[1].trim() : "";
-
-    return { found:true, overall, sector, updated, sourceUrl: best };
+    return { found:true, overall, sector, updated, sourceUrl:url };
   }
 
   // Parse the "Company / Issue Date" table on the IPO dashboard page.
