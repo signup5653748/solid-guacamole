@@ -25,6 +25,10 @@
     --closed:#8A94A6;
     --closed-bg:rgba(138,148,166,0.10);
     --danger:#D9765B;
+    --halal:#5AA9E6;
+    --halal-bg:#101B24;
+    --halal-line:#1E3040;
+    --halal-dim:#7FB8E8;
     --radius:10px;
   }
   *{box-sizing:border-box;}
@@ -183,32 +187,34 @@
   .halal-btn:disabled{opacity:0.6;}
 
   .halal-panel{
-    display:none; border:1px solid var(--line); border-top:none;
+    display:none; border:1px solid var(--halal-line);
     border-radius:0 0 var(--radius) var(--radius);
-    background:var(--panel-2); padding:12px 14px;
+    background:var(--halal-bg); padding:12px 14px;
   }
   .halal-panel.show{display:block;}
-  .halal-summary{font-size:12.5px; font-weight:700; margin-bottom:10px; padding-bottom:10px; border-bottom:1px solid var(--line);}
+  .halal-summary{
+    display:flex; align-items:center; justify-content:space-between; gap:8px; flex-wrap:wrap;
+    font-size:13px; font-weight:700; padding-bottom:8px; margin-bottom:8px; border-bottom:1px solid var(--halal-line);
+    color:var(--halal-dim);
+  }
   .halal-summary.green{color:var(--open);}
   .halal-summary.red{color:var(--danger);}
-  .halal-summary .sub{display:block; font-weight:500; color:var(--muted); font-size:11px; margin-top:3px;}
+  .halal-summary .src-link{font-family:'IBM Plex Mono',monospace; font-weight:500; font-size:10.5px; color:var(--halal-dim); text-decoration:none;}
 
-  .crit-row{padding:7px 0; border-bottom:1px solid var(--line); cursor:pointer;}
-  .crit-row:last-child{border-bottom:none;}
-  .crit-head{display:flex; align-items:center; gap:8px;}
-  .crit-icon{
-    flex:0 0 auto; width:16px; height:16px; border-radius:50%; font-size:10px;
-    display:flex; align-items:center; justify-content:center; font-weight:800;
+  .halal-meta{display:flex; flex-wrap:wrap; gap:6px 14px; font-size:11.5px; color:var(--muted); margin-bottom:8px;}
+  .halal-meta b{color:var(--text); font-weight:600;}
+
+  .halal-snippet{
+    font-size:11px; color:var(--muted); line-height:1.6; background:var(--panel);
+    border:1px solid var(--halal-line); border-radius:6px; padding:8px 10px; margin-bottom:8px;
   }
-  .crit-icon.pass{background:var(--open-bg); color:var(--open);}
-  .crit-icon.fail{background:rgba(217,118,91,0.14); color:var(--danger);}
-  .crit-icon.unknown{background:var(--closed-bg); color:var(--muted-2);}
-  .crit-label{font-size:12.5px; flex:1;}
-  .crit-note{
-    display:none; font-size:11.5px; color:var(--muted); line-height:1.5;
-    margin:6px 0 2px 24px;
+
+  .halal-crosscheck{display:flex; flex-wrap:wrap; gap:6px; align-items:center;}
+  .halal-crosscheck span{font-size:10.5px; color:var(--muted-2); margin-right:2px;}
+  .halal-crosscheck a{
+    font-size:10.5px; font-family:'IBM Plex Mono',monospace; color:var(--halal-dim);
+    text-decoration:none; border:1px solid var(--halal-line); border-radius:20px; padding:3px 9px;
   }
-  .crit-row.open .crit-note{display:block;}
   .halal-error{font-size:12px; color:var(--danger);}
 </style>
 </head>
@@ -407,7 +413,15 @@
     const sector = sectorMatch ? sectorMatch[1].trim() : "";
     const updatedMatch = clean.match(/Last Updated on ([A-Za-z]+ \d{1,2},? \d{4})/i);
     const updated = updatedMatch ? updatedMatch[1].trim() : "";
-    return { found:true, overall, sector, updated, sourceUrl:url };
+
+    let snippet = "";
+    if (overall === "unknown"){
+      const idx = clean.search(/shariah/i);
+      const start = idx >= 0 ? Math.max(0, idx - 60) : (updatedMatch ? clean.indexOf(updatedMatch[0]) : 0);
+      snippet = clean.slice(start, start + 500).trim();
+    }
+
+    return { found:true, overall, sector, updated, sourceUrl:url, snippet };
   }
 
   // Parse the "Company / Issue Date" table on the IPO dashboard page.
@@ -703,28 +717,33 @@
   }
 
   function renderHalalPanelHtml(halal, companyName){
+    const crossLinks = `<div class="halal-crosscheck"><span>Cross-check:</span>${OTHER_SCREENERS.map(s => `<a href="${s.build(companyName)}" target="_blank" rel="noopener">${s.name}</a>`).join("")}</div>`;
+
     if (!halal.found){
-      const err = halal.error ? `<div class="crit-note" style="display:block; margin:6px 0 0 0;">Fetch issue: ${escapeHtml(halal.error)}</div>` : "";
-      return `
-        <div class="halal-summary" style="color:var(--muted);">No verdict found for this company on halalstock.in.${err}
-        <div class="crit-note" style="display:block; margin:8px 0 0 0;">
-          Try checking it directly: ${OTHER_SCREENERS.map(s => `<a href="${s.build(companyName)}" target="_blank" rel="noopener" style="color:var(--gold);">${s.name}</a>`).join(" · ")}
-        </div></div>`;
+      return `<div class="halal-summary">No verdict found on halalstock.in</div>${crossLinks}`;
     }
-    const summaryText = halal.overall === "green" ? "Marked Shariah compliant"
-      : halal.overall === "red" ? "Marked non-Shariah compliant"
-      : "Listed, but verdict unclear from the page";
-    const detailLines = [];
-    if (halal.sector) detailLines.push(`<div class="crit-row"><div class="crit-head"><span class="crit-label"><b>Sector:</b> ${escapeHtml(halal.sector)}</span></div></div>`);
-    if (halal.updated) detailLines.push(`<div class="crit-row"><div class="crit-head"><span class="crit-label"><b>Last updated:</b> ${escapeHtml(halal.updated)}</span></div></div>`);
+
+    if (halal.overall === "unknown"){
+      const snippetHtml = halal.snippet ? `<div class="halal-snippet">${escapeHtml(halal.snippet)}…</div>` : "";
+      return `
+        <div class="halal-summary">Found the page, but couldn't auto-read the verdict
+          <a class="src-link" href="${halal.sourceUrl}" target="_blank" rel="noopener">view source ↗</a>
+        </div>
+        ${snippetHtml}
+        <div class="halal-meta">${halal.sector ? `<span><b>Sector:</b> ${escapeHtml(halal.sector)}</span>` : ""}</div>
+        ${crossLinks}`;
+    }
+
+    const summaryText = halal.overall === "green" ? "✓ Shariah compliant" : "✕ Non-Shariah compliant";
     return `
-      <div class="halal-summary ${halal.overall === "unknown" ? "" : halal.overall}">${summaryText}
-        <span class="sub">Source: <a href="${halal.sourceUrl}" target="_blank" rel="noopener" style="color:inherit;">halalstock.in</a></span>
+      <div class="halal-summary ${halal.overall}">${summaryText}
+        <a class="src-link" href="${halal.sourceUrl}" target="_blank" rel="noopener">halalstock.in ↗</a>
       </div>
-      ${detailLines.join("")}
-      <div class="crit-note" style="display:block; margin:10px 0 0 0; opacity:0.85;">
-        Scraped from halalstock.in's own published screen — not our calculation, and not a fatwa. Cross-check: ${OTHER_SCREENERS.map(s => `<a href="${s.build(companyName)}" target="_blank" rel="noopener" style="color:var(--gold);">${s.name}</a>`).join(" · ")}
-      </div>`;
+      <div class="halal-meta">
+        ${halal.sector ? `<span><b>Sector:</b> ${escapeHtml(halal.sector)}</span>` : ""}
+        ${halal.updated ? `<span><b>Updated:</b> ${escapeHtml(halal.updated)}</span>` : ""}
+      </div>
+      ${crossLinks}`;
   }
 
   function escapeHtml(s){
