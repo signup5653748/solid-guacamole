@@ -29,6 +29,8 @@
     --halal-bg:#101B24;
     --halal-line:#1E3040;
     --halal-dim:#7FB8E8;
+    --day-orange:#E0954B;
+    --day-yellow:#D9C24C;
     --radius:10px;
   }
   *{box-sizing:border-box;}
@@ -147,6 +149,11 @@
   .badge.upcoming{background:var(--upcoming-bg); color:var(--upcoming);}
   .badge.closed{background:var(--closed-bg); color:var(--closed);}
   .badge.unknown{background:var(--closed-bg); color:var(--muted-2);}
+  .badge.opening-today{background:rgba(91,155,217,0.16); color:var(--upcoming);}
+  .badge.day2{background:rgba(224,149,75,0.18); color:var(--day-orange);}
+  .badge.day3{background:rgba(217,194,76,0.18); color:var(--day-yellow);}
+  .badge.closing-today{background:rgba(217,118,91,0.18); color:var(--danger);}
+  .badge.open-later{background:var(--open-bg); color:var(--open);}
 
   .empty{
     text-align:center; padding:40px 20px; color:var(--muted-2);
@@ -348,6 +355,65 @@
   let dateMode = "any";
   let typeFilter = "all";
   let statusFilter = "all";
+
+  // --- local cache (localStorage) — only works when run as a real downloaded file in a
+  // normal browser, not inside Claude's in-app preview sandbox. Fails silently otherwise. ---
+  const LIST_CACHE_KEY = "ipoScanner_listCache_v1";
+  const HALAL_CACHE_KEY = "ipoScanner_halalCache_v1";
+
+  function saveListCache(items){
+    try{
+      const serial = items.map(it => ({
+        ...it,
+        startDate: it.startDate ? it.startDate.toISOString() : null,
+        endDate: it.endDate ? it.endDate.toISOString() : null,
+        halal: undefined // halal results are cached separately, keyed by id
+      }));
+      localStorage.setItem(LIST_CACHE_KEY, JSON.stringify({ savedAt: new Date().toISOString(), items: serial }));
+    }catch(e){ /* storage unavailable — ignore */ }
+  }
+
+  function loadListCache(){
+    try{
+      const raw = localStorage.getItem(LIST_CACHE_KEY);
+      if (!raw) return null;
+      const parsed = JSON.parse(raw);
+      const cutoff = new Date(); cutoff.setDate(cutoff.getDate() - 1); // expire entries closed >1 day ago
+      const items = parsed.items
+        .map(it => ({ ...it, startDate: it.startDate ? new Date(it.startDate) : null, endDate: it.endDate ? new Date(it.endDate) : null }))
+        .filter(it => !it.endDate || it.endDate >= cutoff);
+      return { savedAt: parsed.savedAt, items };
+    }catch(e){ return null; }
+  }
+
+  function saveHalalCache(id, result){
+    try{
+      const raw = localStorage.getItem(HALAL_CACHE_KEY);
+      const map = raw ? JSON.parse(raw) : {};
+      map[id] = result;
+      localStorage.setItem(HALAL_CACHE_KEY, JSON.stringify(map));
+    }catch(e){ /* ignore */ }
+  }
+
+  function loadHalalCache(){
+    try{
+      const raw = localStorage.getItem(HALAL_CACHE_KEY);
+      return raw ? JSON.parse(raw) : {};
+    }catch(e){ return {}; }
+  }
+
+  // day-of-subscription color coding for currently-open IPOs
+  function getOpenDayInfo(item){
+    if (!item.startDate || !item.endDate) return null;
+    const today = todayMidnight();
+    const daysSinceOpen = Math.round((today - item.startDate) / 86400000);
+    const daysUntilClose = Math.round((item.endDate - today) / 86400000);
+    if (daysUntilClose <= 0) return { cls:"closing-today", label:"Closes Today" };
+    if (daysSinceOpen <= 0) return { cls:"opening-today", label:"Opens Today" };
+    if (daysSinceOpen === 1) return { cls:"day2", label:"Day 2" };
+    if (daysSinceOpen === 2) return { cls:"day3", label:"Day 3" };
+    return { cls:"open-later", label:"Open" };
+  }
 
   const $ = id => document.getElementById(id);
   const resultsEl = $("results");
@@ -662,6 +728,11 @@
     }
 
     allItems = combined;
+    // reattach any cached Halal results so a fresh pull doesn't lose prior checks
+    const halalCache = loadHalalCache();
+    allItems.forEach(it => { if (halalCache[it.id]) it.halal = halalCache[it.id]; });
+    saveListCache(allItems);
+
     const withDates = combined.filter(i => i.startDate && i.endDate).length;
     $("statUpdated").textContent = new Date().toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'});
     statusMsg.className = "status-msg";
@@ -763,6 +834,9 @@
     resultsEl.innerHTML = filtered.map(item => {
       const status = getStatus(item);
       const label = status === "open" ? "Open" : status === "upcoming" ? "Upcoming" : status === "closed" ? "Closed" : "—";
+      const dayInfo = status === "open" ? getOpenDayInfo(item) : null;
+      const badgeCls = dayInfo ? dayInfo.cls : status;
+      const badgeLabel = dayInfo ? dayInfo.label : label;
       const halal = item.halal;
       let halalBtnClass = "", halalBtnText = "☾ Halal check";
       if (halal){
@@ -783,7 +857,7 @@
               </div>
             </a>
             <div class="right-col">
-              <span class="badge ${status}">${label}</span>
+              <span class="badge ${badgeCls}">${badgeLabel}</span>
               <button class="halal-btn ${halalBtnClass}" data-action="halal" data-id="${item.id}" data-name="${escapeHtml(item.name)}">${halalBtnText}</button>
             </div>
           </div>
@@ -894,6 +968,7 @@
     try{
       const result = await fetchHalalVerdict(name);
       item.halal = result;
+      saveHalalCache(item.id, result);
       panel.innerHTML = renderHalalPanelHtml(result, name);
       panel.classList.add("show");
       btn.disabled = false;
@@ -912,6 +987,21 @@
 
   refreshBtn.addEventListener("click", refresh);
   $("parsePasteBtn").addEventListener("click", parsePastedHtml);
+
+  // On load: show cached data instantly (if any) instead of a blank screen, then
+  // the person can still tap Pull for fresh data. Cache auto-drops IPOs closed >1 day ago.
+  (function initFromCache(){
+    const cached = loadListCache();
+    if (cached && cached.items.length){
+      const halalCache = loadHalalCache();
+      allItems = cached.items;
+      allItems.forEach(it => { if (halalCache[it.id]) it.halal = halalCache[it.id]; });
+      const when = new Date(cached.savedAt).toLocaleString([], { dateStyle:"medium", timeStyle:"short" });
+      statusMsg.className = "status-msg";
+      statusMsg.textContent = `Showing cached data from ${when}. Tap "Pull latest IPO list" to refresh.`;
+      $("statUpdated").textContent = new Date(cached.savedAt).toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'});
+    }
+  })();
 
   render();
 })();
