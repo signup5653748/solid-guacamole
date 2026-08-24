@@ -204,6 +204,24 @@
   .halal-meta{display:flex; flex-wrap:wrap; gap:6px 14px; font-size:11.5px; color:var(--muted); margin-bottom:8px;}
   .halal-meta b{color:var(--text); font-weight:600;}
 
+  .halal-banner{
+    display:flex; align-items:center; justify-content:space-between; gap:10px; flex-wrap:wrap;
+    font-size:14px; font-weight:800; letter-spacing:0.01em;
+    padding:11px 13px; border-radius:8px; margin-bottom:10px;
+  }
+  .halal-banner.green{background:rgba(63,174,114,0.16); color:var(--open); border:1px solid rgba(63,174,114,0.4);}
+  .halal-banner.red{background:rgba(217,118,91,0.16); color:var(--danger); border:1px solid rgba(217,118,91,0.4);}
+  .halal-banner.unknown{background:var(--panel); color:var(--muted); border:1px solid var(--halal-line); font-weight:600; font-size:12.5px;}
+  .halal-banner .src-link{font-family:'IBM Plex Mono',monospace; font-weight:500; font-size:10.5px; color:inherit; opacity:0.75; text-decoration:none;}
+
+  .halal-sources{margin-bottom:8px; border-top:1px dashed var(--halal-line); padding-top:8px;}
+  .halal-source-row{display:flex; align-items:center; justify-content:space-between; padding:4px 0; font-size:11.5px;}
+  .halal-source-row .src-name{color:var(--muted);}
+  .halal-source-row .src-verdict{font-family:'IBM Plex Mono',monospace; font-weight:700; text-decoration:none;}
+  .halal-source-row .src-verdict.green{color:var(--open);}
+  .halal-source-row .src-verdict.red{color:var(--danger);}
+  .halal-source-row .src-verdict.muted{color:var(--muted-2); font-weight:500;}
+
   .halal-snippet{
     font-size:11px; color:var(--muted); line-height:1.6; background:var(--panel);
     border:1px solid var(--halal-line); border-radius:6px; padding:8px 10px; margin-bottom:8px;
@@ -356,72 +374,99 @@
   // no ratio math done here, just find and read their published answer. ---
   const OTHER_SCREENERS = [
     { name:"Zamzam Capital", build: q => "https://zamzam-capital.com/?s=" + encodeURIComponent(q) },
-    { name:"Islamicly", build: q => "https://www.islamicly.com/?s=" + encodeURIComponent(q) },
-    { name:"Musaffa", build: q => "https://musaffa.com/stock-screener/?search=" + encodeURIComponent(q) }
+    { name:"Islamicly", build: q => "https://www.islamicly.com/?s=" + encodeURIComponent(q) }
   ];
 
-  async function fetchHalalVerdict(companyName){
-    const base = companyName.toLowerCase()
-      .replace(/&/g,"")
-      .replace(/[^a-z0-9]+/g,"-")
-      .replace(/^-+|-+$/g,"");
-    const candidates = [base, base + "-ltd", base + "-limited"];
+  function stripToLines(pageText){
+    // Preserve line boundaries (tags/blank-runs -> newline) so field extraction can't run away
+    // across paragraphs, then flatten for the wording checks that don't need boundaries.
+    const withBreaks = pageText
+      .replace(/<[^>]+>/g, "\n")
+      .replace(/&nbsp;/gi, " ")
+      .replace(/&amp;/gi, "&");
+    const lines = withBreaks.split(/\n+/).map(l => l.trim()).filter(Boolean);
+    const flat = lines.join(" ").replace(/\s+/g, " ");
+    return { lines, flat };
+  }
 
+  async function fetchViaDdgSiteSearch(domain, urlPattern, companyName){
+    const ddgUrl = "https://html.duckduckgo.com/html/?q=" + encodeURIComponent(`site:${domain} ${companyName} shariah compliant`);
+    const { text } = await fetchWithProxies(ddgUrl);
+    let links = Array.from(new Set(text.match(urlPattern) || []));
+    if (!links.length){
+      const uddg = Array.from(text.matchAll(/uddg=([^&"]+)/g)).map(m => decodeURIComponent(m[1]));
+      links = uddg.filter(u => urlPattern.test(u));
+    }
+    if (!links.length) return null;
+    const page = await fetchWithProxies(links[0]);
+    return { text: page.text, url: links[0] };
+  }
+
+  // --- Source 1: halalstock.in — publishes per-IPO verdict articles at a guessable URL ---
+  async function fetchHalalstockVerdict(companyName){
+    const base = companyName.toLowerCase().replace(/&/g,"").replace(/[^a-z0-9]+/g,"-").replace(/^-+|-+$/g,"");
+    const candidates = [base, base + "-ltd", base + "-limited"];
     for (const slug of candidates){
       const url = `https://halalstock.in/is-${slug}-halal-and-shariah-compliant/`;
       try{
         const { text } = await fetchWithProxies(url);
-        if (/Sector\s*[–-]\s*Industry/i.test(text) || /shariah compliant stock/i.test(text)){
-          return buildVerdictFromPage(text, url);
+        const { lines, flat } = stripToLines(text);
+        if (/Sector\s*[–-]\s*Industry/i.test(flat) || /shariah compliant stock/i.test(flat)){
+          return parseHalalstockPage(text, lines, flat, url);
         }
       }catch(e){ /* try next candidate */ }
     }
-
-    // fallback: a real search engine, since halalstock.in's own search doesn't work via plain fetch
     try{
-      const ddgUrl = "https://html.duckduckgo.com/html/?q=" + encodeURIComponent(`site:halalstock.in ${companyName} halal shariah compliant`);
-      const { text } = await fetchWithProxies(ddgUrl);
-      let links = Array.from(new Set(text.match(/https:\/\/halalstock\.in\/is-[a-z0-9-]+-halal-and-shariah-compliant\/?/gi) || []));
-      if (!links.length){
-        const uddg = Array.from(text.matchAll(/uddg=([^&"]+)/g)).map(m => decodeURIComponent(m[1]));
-        links = uddg.filter(u => /halalstock\.in\/is-.*-halal-and-shariah-compliant/i.test(u));
-      }
-      if (links.length){
-        const page = await fetchWithProxies(links[0]);
-        return buildVerdictFromPage(page.text, links[0]);
-      }
+      const hit = await fetchViaDdgSiteSearch("halalstock.in", /https:\/\/halalstock\.in\/is-[a-z0-9-]+-halal-and-shariah-compliant\/?/gi, companyName);
+      if (hit){ const { lines, flat } = stripToLines(hit.text); return parseHalalstockPage(hit.text, lines, flat, hit.url); }
     }catch(e){ /* fall through */ }
-
-    return { found:false };
+    return { name:"halalstock.in", found:false };
   }
 
-  function buildVerdictFromPage(pageText, url){
-    // strip any HTML tags/entities so wording checks work regardless of which proxy/mode returned this
-    const clean = pageText
-      .replace(/<[^>]+>/g, " ")
-      .replace(/&nbsp;/gi, " ")
-      .replace(/&amp;/gi, "&")
-      .replace(/\s+/g, " ");
-
+  function parseHalalstockPage(rawText, lines, flat, url){
     let overall = "unknown";
-    if (/hs-yes\.jpg/i.test(pageText)) overall = "green";
-    else if (/hs-no\.jpg/i.test(pageText)) overall = "red";
-    else if (/non[\s-]?shariah compliant|not\s+(a\s+)?shariah compliant/i.test(clean)) overall = "red";
-    else if (/shariah compliant stock|halal and shariah compliant/i.test(clean)) overall = "green";
+    if (/hs-yes\.jpg/i.test(rawText)) overall = "green";
+    else if (/hs-no\.jpg/i.test(rawText)) overall = "red";
+    else if (/non[\s-]?shariah compliant|not\s+(a\s+)?shariah compliant/i.test(flat)) overall = "red";
+    else if (/shariah compliant stock|halal and shariah compliant/i.test(flat)) overall = "green";
 
-    const sectorMatch = clean.match(/Sector\s*[–-]\s*Industry\s*:\s*([^.\n]+)/i);
-    const sector = sectorMatch ? sectorMatch[1].trim() : "";
-    const updatedMatch = clean.match(/Last Updated on ([A-Za-z]+ \d{1,2},? \d{4})/i);
+    const sectorLine = lines.find(l => /Sector\s*[–-]\s*Industry\s*:/i.test(l));
+    const sector = sectorLine ? sectorLine.replace(/.*Sector\s*[–-]\s*Industry\s*:\s*/i, "").trim() : "";
+    const updatedLine = lines.find(l => /Last Updated on/i.test(l));
+    const updatedMatch = updatedLine ? updatedLine.match(/Last Updated on ([A-Za-z]+ \d{1,2},? \d{4})/i) : null;
     const updated = updatedMatch ? updatedMatch[1].trim() : "";
 
     let snippet = "";
     if (overall === "unknown"){
-      const idx = clean.search(/shariah/i);
-      const start = idx >= 0 ? Math.max(0, idx - 60) : (updatedMatch ? clean.indexOf(updatedMatch[0]) : 0);
-      snippet = clean.slice(start, start + 500).trim();
+      const idx = flat.search(/shariah/i);
+      const start = idx >= 0 ? Math.max(0, idx - 60) : 0;
+      snippet = flat.slice(start, start + 500).trim();
     }
+    return { name:"halalstock.in", found:true, overall, sector, updated, sourceUrl:url, snippet };
+  }
 
-    return { found:true, overall, sector, updated, sourceUrl:url, snippet };
+  // --- Source 2: Musaffa — per-stock pages, but only exists once a company is listed/ticker-known,
+  // so we can only find it via search (no direct URL guess possible without the ticker). ---
+  async function fetchMusaffaVerdict(companyName){
+    try{
+      const hit = await fetchViaDdgSiteSearch("musaffa.com/stock", /https:\/\/musaffa\.com\/stock\/[A-Za-z0-9.\-]+\/?/gi, companyName);
+      if (!hit) return { name:"Musaffa", found:false };
+      const { flat } = stripToLines(hit.text);
+      let overall = "unknown";
+      if (/classified as\s+HALAL|considered Halal\s*&?\s*Shariah Compliant|currently\s+Halal/i.test(flat)) overall = "green";
+      else if (/classified as\s+(NON[\s-]?HALAL|HARAM)|considered\s+(Non[\s-]?Compliant|Haram)|NOT\s+Shariah Compliant/i.test(flat)) overall = "red";
+      return { name:"Musaffa", found:true, overall, sourceUrl:hit.url };
+    }catch(e){
+      return { name:"Musaffa", found:false };
+    }
+  }
+
+  async function fetchHalalVerdict(companyName){
+    const [primary, musaffa] = await Promise.all([
+      fetchHalalstockVerdict(companyName),
+      fetchMusaffaVerdict(companyName)
+    ]);
+    return { primary, secondary: [musaffa] };
   }
 
   // Parse the "Company / Issue Date" table on the IPO dashboard page.
@@ -691,9 +736,10 @@
       const halal = item.halal;
       let halalBtnClass = "", halalBtnText = "☾ Halal check";
       if (halal){
-        if (!halal.found){ halalBtnClass = ""; halalBtnText = "? Not found"; }
-        else if (halal.overall === "green"){ halalBtnClass = "green"; halalBtnText = "✓ Halal"; }
-        else if (halal.overall === "red"){ halalBtnClass = "red"; halalBtnText = "✕ Not Halal"; }
+        const p = halal.primary;
+        if (!p.found){ halalBtnClass = ""; halalBtnText = "? Not found"; }
+        else if (p.overall === "green"){ halalBtnClass = "green"; halalBtnText = "✓ Halal"; }
+        else if (p.overall === "red"){ halalBtnClass = "red"; halalBtnText = "✕ Not Halal"; }
         else { halalBtnClass = ""; halalBtnText = "? Unclear"; }
       }
       return `
@@ -717,32 +763,46 @@
   }
 
   function renderHalalPanelHtml(halal, companyName){
-    const crossLinks = `<div class="halal-crosscheck"><span>Cross-check:</span>${OTHER_SCREENERS.map(s => `<a href="${s.build(companyName)}" target="_blank" rel="noopener">${s.name}</a>`).join("")}</div>`;
+    const p = halal.primary;
+    const crossLinks = `<div class="halal-crosscheck"><span>Also try:</span>${OTHER_SCREENERS.map(s => `<a href="${s.build(companyName)}" target="_blank" rel="noopener">${s.name}</a>`).join("")}</div>`;
 
-    if (!halal.found){
-      return `<div class="halal-summary">No verdict found on halalstock.in</div>${crossLinks}`;
-    }
+    const secondaryHtml = (halal.secondary || []).map(s => {
+      if (!s.found) return `<div class="halal-source-row"><span class="src-name">${s.name}</span><span class="src-verdict muted">not found</span></div>`;
+      const cls = s.overall === "green" ? "green" : s.overall === "red" ? "red" : "muted";
+      const text = s.overall === "green" ? "✓ Halal" : s.overall === "red" ? "✕ Not Halal" : "? unclear";
+      return `<div class="halal-source-row"><span class="src-name">${s.name}</span><a class="src-verdict ${cls}" href="${s.sourceUrl}" target="_blank" rel="noopener">${text} ↗</a></div>`;
+    }).join("");
 
-    if (halal.overall === "unknown"){
-      const snippetHtml = halal.snippet ? `<div class="halal-snippet">${escapeHtml(halal.snippet)}…</div>` : "";
+    if (!p.found){
       return `
-        <div class="halal-summary">Found the page, but couldn't auto-read the verdict
-          <a class="src-link" href="${halal.sourceUrl}" target="_blank" rel="noopener">view source ↗</a>
-        </div>
-        ${snippetHtml}
-        <div class="halal-meta">${halal.sector ? `<span><b>Sector:</b> ${escapeHtml(halal.sector)}</span>` : ""}</div>
+        <div class="halal-banner unknown">No verdict found on halalstock.in</div>
+        ${secondaryHtml ? `<div class="halal-sources">${secondaryHtml}</div>` : ""}
         ${crossLinks}`;
     }
 
-    const summaryText = halal.overall === "green" ? "✓ Shariah compliant" : "✕ Non-Shariah compliant";
+    if (p.overall === "unknown"){
+      const snippetHtml = p.snippet ? `<div class="halal-snippet">${escapeHtml(p.snippet)}…</div>` : "";
+      return `
+        <div class="halal-banner unknown">Found the page, couldn't auto-read the verdict
+          <a class="src-link" href="${p.sourceUrl}" target="_blank" rel="noopener">view source ↗</a>
+        </div>
+        ${snippetHtml}
+        <div class="halal-meta">${p.sector ? `<span><b>Sector:</b> ${escapeHtml(p.sector)}</span>` : ""}</div>
+        ${secondaryHtml ? `<div class="halal-sources">${secondaryHtml}</div>` : ""}
+        ${crossLinks}`;
+    }
+
+    const summaryText = p.overall === "green" ? "✓ Shariah Compliant" : "✕ Non-Shariah Compliant";
     return `
-      <div class="halal-summary ${halal.overall}">${summaryText}
-        <a class="src-link" href="${halal.sourceUrl}" target="_blank" rel="noopener">halalstock.in ↗</a>
+      <div class="halal-banner ${p.overall}">
+        <span class="banner-text">${summaryText}</span>
+        <a class="src-link" href="${p.sourceUrl}" target="_blank" rel="noopener">halalstock.in ↗</a>
       </div>
       <div class="halal-meta">
-        ${halal.sector ? `<span><b>Sector:</b> ${escapeHtml(halal.sector)}</span>` : ""}
-        ${halal.updated ? `<span><b>Updated:</b> ${escapeHtml(halal.updated)}</span>` : ""}
+        ${p.sector ? `<span><b>Sector:</b> ${escapeHtml(p.sector)}</span>` : ""}
+        ${p.updated ? `<span><b>Updated:</b> ${escapeHtml(p.updated)}</span>` : ""}
       </div>
+      ${secondaryHtml ? `<div class="halal-sources">${secondaryHtml}</div>` : ""}
       ${crossLinks}`;
   }
 
@@ -793,7 +853,7 @@
     if (!item) return;
     const panel = document.getElementById("halal-" + id);
 
-    if (item.halal && item.halal.found && (item.halal.overall === "green" || item.halal.overall === "red")){
+    if (item.halal && item.halal.primary.found && (item.halal.primary.overall === "green" || item.halal.primary.overall === "red")){
       panel.classList.toggle("show");
       return;
     }
@@ -807,9 +867,10 @@
       panel.innerHTML = renderHalalPanelHtml(result, name);
       panel.classList.add("show");
       btn.disabled = false;
-      if (!result.found){ btn.className = "halal-btn"; btn.textContent = "? Not found"; }
-      else if (result.overall === "green"){ btn.className = "halal-btn green"; btn.textContent = "✓ Halal"; }
-      else if (result.overall === "red"){ btn.className = "halal-btn red"; btn.textContent = "✕ Not Halal"; }
+      const p = result.primary;
+      if (!p.found){ btn.className = "halal-btn"; btn.textContent = "? Not found"; }
+      else if (p.overall === "green"){ btn.className = "halal-btn green"; btn.textContent = "✓ Halal"; }
+      else if (p.overall === "red"){ btn.className = "halal-btn red"; btn.textContent = "✕ Not Halal"; }
       else { btn.className = "halal-btn"; btn.textContent = "? Unclear"; }
     }catch(err){
       panel.innerHTML = `<div class="halal-error">Couldn't check this one (${escapeHtml(err.message || "network error")}). Tap again to retry.</div>`;
